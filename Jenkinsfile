@@ -10,7 +10,7 @@ pipeline {
         choice(name: "CHANNEL", choices: ["dev", "beta", "release", "nightly"], description: "")
         booleanParam(name: "WIPE_WORKSPACE", defaultValue: false, description: "")
         booleanParam(name: "RUN_INIT", defaultValue: false, description: "")
-        booleanParam(name: "DISABLE_SCCACHE", defaultValue: false, description: "")
+        booleanParam(name: "DISABLE_SCCACHE", defaultValue: true, description: "")
         booleanParam(name: "BUILD_LINUX", defaultValue: true, description: "")
         booleanParam(name: "BUILD_MAC", defaultValue: true, description: "")
         booleanParam(name: "BUILD_WINDOWS_X64", defaultValue: true, description: "")
@@ -19,10 +19,20 @@ pipeline {
         booleanParam(name: "DEBUG", defaultValue: false, description: "")
     }
     environment {
-        REFERRAL_API_KEY = credentials("REFERRAL_API_KEY")
-        BRAVE_GOOGLE_API_KEY = credentials("npm_config_brave_google_api_key")
-        BRAVE_ARTIFACTS_BUCKET = credentials("brave-jenkins-artifacts-s3-bucket")
-        BRAVE_S3_BUCKET = credentials("brave-binaries-s3-bucket")
+        BRANCH = "${params.BRANCH}"
+        CHANNEL = "${params.CHANNEL}"
+        CHANNEL_CAPITALIZED = "${CHANNEL}".capitalize()
+        WIPE_WORKSPACE = "${params.WIPE_WORKSPACE}"
+        RUN_INIT = "${params.RUN_INIT}"
+        DISABLE_SCCACHE = "${params.DISABLE_SCCACHE}"
+        BUILD_TYPE = "Release"
+        OUT_DIR = "src/out/${BUILD_TYPE}"
+        LINT_BRANCH = "TEMP_LINT_BRANCH_${BUILD_NUMBER}"
+        //REFERRAL_API_KEY = credentials("REFERRAL_API_KEY")
+        //BRAVE_GOOGLE_API_KEY = credentials("npm_config_brave_google_api_key")
+        //BRAVE_ARTIFACTS_BUCKET = credentials("brave-jenkins-artifacts-s3-bucket")
+        //BRAVE_S3_BUCKET = credentials("brave-binaries-s3-bucket")
+        //BRAVE_GITHUB_TOKEN = "brave-browser-releases-github"
     }
     stages {
         stage("env") {
@@ -44,9 +54,9 @@ pipeline {
                     LINT_BRANCH = "TEMP_LINT_BRANCH_" + BUILD_NUMBER
                     RELEASE_TYPE = (JOB_NAME == "brave-browser-build" ? "release" : "ci")
                     BRANCH_TO_BUILD = (env.CHANGE_BRANCH == null ? BRANCH : env.CHANGE_BRANCH)
-                    BRAVE_GITHUB_TOKEN = "brave-browser-releases-github"
-                    GITHUB_API = "https://api.github.com/repos/brave"
-                    GITHUB_CREDENTIAL_ID = "brave-builds-github-token-for-pr-builder"
+                    //BRAVE_GITHUB_TOKEN = "brave-browser-releases-github"
+                    //GITHUB_API = "https://api.github.com/repos/brave"
+                    //GITHUB_CREDENTIAL_ID = "brave-builds-github-token-for-pr-builder"
                     // BRANCH_EXISTS_IN_BC = httpRequest(url: GITHUB_API + "/brave-core/branches/" + BRANCH_TO_BUILD, validResponseCodes: '100:499', authentication: GITHUB_CREDENTIAL_ID, quiet: !DEBUG).status == 200
                     SKIP = false
                     if (env.CHANGE_BRANCH) {
@@ -83,7 +93,7 @@ pipeline {
                     agent { label "linux-${RELEASE_TYPE}" }
                     environment {
                         GIT_CACHE_PATH = "${HOME}/cache"
-                        SCCACHE_BUCKET = credentials("brave-browser-sccache-linux-s3-bucket")
+                        //SCCACHE_BUCKET = credentials("brave-browser-sccache-linux-s3-bucket")
                     }
                     stages {
                         stage("checkout") {
@@ -132,12 +142,15 @@ pipeline {
                                 script {
                                     try {
                                         sh """
-                                            git -C src/brave config user.name brave-builds
-                                            git -C src/brave config user.email devops@brave.com
-                                            git -C src/brave checkout -b ${LINT_BRANCH}
+                                            //git -C src/brave config user.name brave-builds
+                                            //git -C src/brave config user.email devops@brave.com
+
+                                            //git -C src/brave checkout -b ${LINT_BRANCH}
+
                                             npm run lint
-                                            git -C src/brave checkout -q -
-                                            git -C src/brave branch -D ${LINT_BRANCH}
+
+                                            //git -C src/brave checkout -q -
+                                            //git -C src/brave branch -D ${LINT_BRANCH}
                                         """
                                     }
                                     catch (ex) {
@@ -146,86 +159,10 @@ pipeline {
                                 }
                             }
                         }
-                        stage("sccache") {
-                            when {
-                                anyOf {
-                                    expression { "${DISABLE_SCCACHE}" == "false" }
-                                    expression { "${RELEASE_TYPE}" == "ci" }
-                                }
-                            }
-                            steps {
-                                sh "npm config --userconfig=.npmrc set sccache sccache"
-                            }
-                        }
-                        stage("build") {
-                            steps {
-                                sh """
-                                    npm config --userconfig=.npmrc set brave_referrals_api_key ${REFERRAL_API_KEY}
-                                    npm config --userconfig=.npmrc set brave_google_api_endpoint https://location.services.mozilla.com/v1/geolocate?key=
-                                    npm config --userconfig=.npmrc set brave_google_api_key ${BRAVE_GOOGLE_API_KEY}
-                                    npm config --userconfig=.npmrc set google_api_endpoint safebrowsing.brave.com
-                                    npm config --userconfig=.npmrc set google_api_key dummytoken
-                                    npm run build -- ${BUILD_TYPE} --channel=${CHANNEL} --official_build=true
-                                """
-                            }
-                        }
-                        stage("test-security") {
-                            steps {
-                                timeout(time: 4, unit: "MINUTES") {
-                                    script {
-                                        try {
-                                            sh "npm run test-security -- --output_path=\"${OUT_DIR}/brave\""
-                                        }
-                                        catch (ex) {
-                                            currentBuild.result = "UNSTABLE"
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        stage("test-unit") {
-                            steps {
-                                timeout(time: 20, unit: "MINUTES") {
-                                    script {
-                                        try {
-                                            sh "npm run test -- brave_unit_tests ${BUILD_TYPE} --output brave_unit_tests.xml"
-                                            xunit([GoogleTest(deleteOutputFiles: true, failIfNotNew: true, pattern: "src/brave_unit_tests.xml", skipNoTestFiles: false, stopProcessingIfError: true)])
-                                        }
-                                        catch (ex) {
-                                            currentBuild.result = "UNSTABLE"
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        stage("test-browser") {
-                            steps {
-                                timeout(time: 20, unit: "MINUTES") {
-                                    script {
-                                        try {
-                                            sh "npm run test -- brave_browser_tests ${BUILD_TYPE} --output brave_browser_tests.xml"
-                                            xunit([GoogleTest(deleteOutputFiles: true, failIfNotNew: true, pattern: "src/brave_browser_tests.xml", skipNoTestFiles: false, stopProcessingIfError: true)])
-                                        }
-                                        catch (ex) {
-                                            currentBuild.result = "UNSTABLE"
-                                        }
-                                    }
-                                }
-                            }
-                        }
+
                         stage("dist") {
                             steps {
-                                sh "npm run create_dist -- ${BUILD_TYPE} --channel=${CHANNEL} --official_build=true"
-                            }
-                        }
-                        stage("archive") {
-                            steps {
-                                s3Upload(acl: "Private", bucket: "${BRAVE_ARTIFACTS_BUCKET}", includePathPattern: "*.deb",
-                                    path: "${JOB_NAME}/${BUILD_NUMBER}/", pathStyleAccessEnabled: true, payloadSigningEnabled: true, workingDir: "${OUT_DIR}"
-                                )
-                                s3Upload(acl: "Private", bucket: "${BRAVE_ARTIFACTS_BUCKET}", includePathPattern: "*.rpm",
-                                    path: "${JOB_NAME}/${BUILD_NUMBER}/", pathStyleAccessEnabled: true, payloadSigningEnabled: true, workingDir: "${OUT_DIR}"
-                                )
+                                sh "npm run create_dist -- ${BUILD_TYPE} --channel=${CHANNEL} --official_build=false"
                             }
                         }
                     }
@@ -238,7 +175,7 @@ pipeline {
                     agent { label "mac-${RELEASE_TYPE}" }
                     environment {
                         GIT_CACHE_PATH = "${HOME}/cache"
-                        SCCACHE_BUCKET = credentials("brave-browser-sccache-mac-s3-bucket")
+                        //SCCACHE_BUCKET = credentials("brave-browser-sccache-mac-s3-bucket")
                     }
                     stages {
                         stage("checkout") {
@@ -287,12 +224,12 @@ pipeline {
                                 script {
                                     try {
                                         sh """
-                                            git -C src/brave config user.name brave-builds
-                                            git -C src/brave config user.email devops@brave.com
-                                            git -C src/brave checkout -b ${LINT_BRANCH}
+                                            //git -C src/brave config user.name brave-builds
+                                            //git -C src/brave config user.email devops@brave.com
+                                            //git -C src/brave checkout -b ${LINT_BRANCH}
                                             npm run lint
-                                            git -C src/brave checkout -q -
-                                            git -C src/brave branch -D ${LINT_BRANCH}
+                                            //git -C src/brave checkout -q -
+                                            //git -C src/brave branch -D ${LINT_BRANCH}
                                         """
                                     }
                                     catch (ex) {
@@ -301,79 +238,32 @@ pipeline {
                                 }
                             }
                         }
-                        stage("sccache") {
-                            when {
-                                anyOf {
-                                    expression { "${DISABLE_SCCACHE}" == "false" }
-                                    expression { "${RELEASE_TYPE}" == "ci" }
-                                }
-                            }
-                            steps {
-                                sh "npm config --userconfig=.npmrc set sccache sccache"
-                            }
-                        }
+                        //stage("sccache") {
+                        //    when {
+                         //       anyOf {
+                        //            expression { "${DISABLE_SCCACHE}" == "false" }
+                        //            expression { "${RELEASE_TYPE}" == "ci" }
+                        //        }
+                        //    }
+                        //    steps {
+                        //        sh "npm config --userconfig=.npmrc set sccache sccache"
+                        //    }
+                        //}
                         stage("build") {
                             steps {
                                 sh """
-                                    npm config --userconfig=.npmrc set brave_referrals_api_key ${REFERRAL_API_KEY}
-                                    npm config --userconfig=.npmrc set brave_google_api_endpoint https://location.services.mozilla.com/v1/geolocate?key=
-                                    npm config --userconfig=.npmrc set brave_google_api_key ${BRAVE_GOOGLE_API_KEY}
-                                    npm config --userconfig=.npmrc set google_api_endpoint safebrowsing.brave.com
-                                    npm config --userconfig=.npmrc set google_api_key dummytoken
-                                    npm run build -- ${BUILD_TYPE} --channel=${CHANNEL} --official_build=true
+
+                                    npm run build -- ${BUILD_TYPE} --channel=${CHANNEL} --official_build=false
                                 """
                             }
                         }
-                        stage("test-security") {
-                            steps {
-                                timeout(time: 4, unit: "MINUTES") {
-                                    script {
-                                        try {
-                                            sh "npm run test-security -- --output_path=\"${OUT_DIR}/Brave\\ Browser\\ ${CHANNEL_CAPITALIZED}.app/Contents/MacOS/Brave\\ Browser\\ ${CHANNEL_CAPITALIZED}\""
-                                        }
-                                        catch (ex) {
-                                            currentBuild.result = "UNSTABLE"
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        stage("test-unit") {
-                            steps {
-                                timeout(time: 20, unit: "MINUTES") {
-                                    script {
-                                        try {
-                                            sh "npm run test -- brave_unit_tests ${BUILD_TYPE} --output brave_unit_tests.xml"
-                                            xunit([GoogleTest(deleteOutputFiles: true, failIfNotNew: true, pattern: "src/brave_unit_tests.xml", skipNoTestFiles: false, stopProcessingIfError: true)])
-                                        }
-                                        catch (ex) {
-                                            currentBuild.result = "UNSTABLE"
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        stage("test-browser") {
-                            steps {
-                                timeout(time: 20, unit: "MINUTES") {
-                                    script {
-                                        try {
-                                            sh "npm run test -- brave_browser_tests ${BUILD_TYPE} --output brave_browser_tests.xml"
-                                            xunit([GoogleTest(deleteOutputFiles: true, failIfNotNew: true, pattern: "src/brave_browser_tests.xml", skipNoTestFiles: false, stopProcessingIfError: true)])
-                                        }
-                                        catch (ex) {
-                                            currentBuild.result = "UNSTABLE"
-                                        }
-                                    }
-                                }
-                            }
-                        }
+
                         stage("dist-ci") {
                             when {
                                 expression { "${RELEASE_TYPE}" == "ci" }
                             }
                             steps {
-                                sh "npm run create_dist -- ${BUILD_TYPE} --channel=${CHANNEL} --official_build=true --skip_signing"
+                                sh "npm run create_dist -- ${BUILD_TYPE} --channel=${CHANNEL} --official_build=false --skip_signing"
                             }
                         }
                         stage("dist-release") {
@@ -381,28 +271,28 @@ pipeline {
                                 expression { "${RELEASE_TYPE}" == "release" }
                             }
                             steps {
-                                sh "npm run create_dist -- ${BUILD_TYPE} --channel=${CHANNEL} --official_build=true"
+                                sh "npm run create_dist -- ${BUILD_TYPE} --channel=${CHANNEL} --official_build=false"
                             }
                         }
-                        stage("archive") {
-                            steps {
-                                withAWS(credentials: "mac-build-s3-upload-artifacts", region: "us-west-2") {
-                                    s3Upload(acl: "Private", bucket: "${BRAVE_ARTIFACTS_BUCKET}", includePathPattern: "unsigned_dmg/*.dmg",
-                                        path: "${JOB_NAME}/${BUILD_NUMBER}/", pathStyleAccessEnabled: true, payloadSigningEnabled: true, workingDir: "${OUT_DIR}"
-                                    )
-                                }
-                                withAWS(credentials: "mac-build-s3-upload-artifacts", region: "us-west-2") {
-                                    s3Upload(acl: "Private", bucket: "${BRAVE_ARTIFACTS_BUCKET}", includePathPattern: "*.dmg",
-                                        path: "${JOB_NAME}/${BUILD_NUMBER}/", pathStyleAccessEnabled: true, payloadSigningEnabled: true, workingDir: "${OUT_DIR}"
-                                    )
-                                }
-                                withAWS(credentials: "mac-build-s3-upload-artifacts", region: "us-west-2") {
-                                    s3Upload(acl: "Private", bucket: "${BRAVE_ARTIFACTS_BUCKET}", includePathPattern: "*.pkg",
-                                        path: "${JOB_NAME}/${BUILD_NUMBER}/", pathStyleAccessEnabled: true, payloadSigningEnabled: true, workingDir: "${OUT_DIR}"
-                                    )
-                                }
-                            }
-                        }
+                        //stage("archive") {
+                        //    steps {
+                        //        withAWS(credentials: "mac-build-s3-upload-artifacts", region: "us-west-2") {
+                        //            s3Upload(acl: "Private", bucket: "${BRAVE_ARTIFACTS_BUCKET}", includePathPattern: "unsigned_dmg/*.dmg",
+                        //                path: "${JOB_NAME}/${BUILD_NUMBER}/", pathStyleAccessEnabled: true, payloadSigningEnabled: true, workingDir: "${OUT_DIR}"
+                        //            )
+                        //        }
+                         //       withAWS(credentials: "mac-build-s3-upload-artifacts", region: "us-west-2") {
+                        //            s3Upload(acl: "Private", bucket: "${BRAVE_ARTIFACTS_BUCKET}", includePathPattern: "*.dmg",
+                        //                path: "${JOB_NAME}/${BUILD_NUMBER}/", pathStyleAccessEnabled: true, payloadSigningEnabled: true, workingDir: "${OUT_DIR}"
+                        //            )
+                        //        }
+                        //        withAWS(credentials: "mac-build-s3-upload-artifacts", region: "us-west-2") {
+                        //            s3Upload(acl: "Private", bucket: "${BRAVE_ARTIFACTS_BUCKET}", includePathPattern: "*.pkg",
+                        //                path: "${JOB_NAME}/${BUILD_NUMBER}/", pathStyleAccessEnabled: true, payloadSigningEnabled: true, workingDir: "${OUT_DIR}"
+                        //           )
+                        //        }
+                        //    }
+                        //}
                     }
                 }
                 stage("windows-x64") {
@@ -487,11 +377,6 @@ pipeline {
                         stage("build") {
                             steps {
                                 powershell """
-                                    npm config --userconfig=.npmrc set brave_referrals_api_key ${REFERRAL_API_KEY}
-                                    npm config --userconfig=.npmrc set brave_google_api_endpoint https://location.services.mozilla.com/v1/geolocate?key=
-                                    npm config --userconfig=.npmrc set brave_google_api_key ${BRAVE_GOOGLE_API_KEY}
-                                    npm config --userconfig=.npmrc set google_api_endpoint safebrowsing.brave.com
-                                    npm config --userconfig=.npmrc set google_api_key dummytoken
                                     npm run build -- ${BUILD_TYPE} --channel=${CHANNEL} --official_build=true
                                 """
                             }
@@ -661,11 +546,7 @@ pipeline {
                         stage("build") {
                             steps {
                                 powershell """
-                                    npm config --userconfig=.npmrc set brave_referrals_api_key ${REFERRAL_API_KEY}
-                                    npm config --userconfig=.npmrc set brave_google_api_endpoint https://location.services.mozilla.com/v1/geolocate?key=
-                                    npm config --userconfig=.npmrc set brave_google_api_key ${BRAVE_GOOGLE_API_KEY}
-                                    npm config --userconfig=.npmrc set google_api_endpoint safebrowsing.brave.com
-                                    npm config --userconfig=.npmrc set google_api_key dummytoken
+     
                                     npm run build -- ${BUILD_TYPE} --channel=${CHANNEL} --official_build=true --target_arch=ia32
                                 """
                             }
