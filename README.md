@@ -2,6 +2,12 @@
 
 Welcome to the free speech internet.  Dissenter is a fork of the [Brave browser](https://github.com/brave/brave-browser), so it's fast and it blocks ads and 3rd-party trackers.  The Dissenter extension, which creates a comment section for any and every page on the internet, is built right in.  We're just getting started, we have big future plans for this browser.
 
+## Status
+
+Focus was on the overall repo and getting a Windows build done.  The latest Windows installer is here: [Download](https://dissenter.com/dist/browser/dissenter_installer_74_0_66_49.exe)
+
+Known issues: Can't set Dissenter as default web browser yet.
+
 ## Overview 
 
 This repository holds the build tools needed to build the Dissenter desktop browser for macOS, Windows, and Linux.  In particular, it fetches and syncs code from the projects defined in `package.json` and `src/brave/DEPS`:
