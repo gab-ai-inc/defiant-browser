@@ -1,6 +1,6 @@
 {
   "name": "dissenter",
-  "version": "0.66.49",
+  "version": "0.67.2",
   "description": "Welcome to the free speech internet.",
   "scripts": {
     "audit_deps": "node ./scripts/audit.js",
