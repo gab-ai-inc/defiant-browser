@@ -1,6 +1,6 @@
 {
   "name": "dissenter",
-  "version": "0.67.13",
+  "version": "0.67.53",
   "description": "Welcome to the free speech internet.",
   "scripts": {
     "audit_deps": "node ./scripts/audit.js",
@@ -26,7 +26,7 @@
     "projects": {
       "chrome": {
         "dir": "src",
-        "tag": "74.0.3729.131",
+        "tag": "75.0.3770.38",
         "repository": {
           "url": "https://chromium.googlesource.com/chromium/src.git"
         },
