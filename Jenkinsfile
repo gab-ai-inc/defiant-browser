@@ -7,10 +7,11 @@ pipeline {
     }
     parameters {
         choice(name: "CHANNEL", choices: ["nightly", "dev", "beta", "release"], description: "")
+        choice(name: "BUILD_TYPE", choices: ["Release", "Debug"], description: "")
         booleanParam(name: "WIPE_WORKSPACE", defaultValue: false, description: "")
-        booleanParam(name: "RUN_INIT", defaultValue: false, description: "")
+        booleanParam(name: "SKIP_INIT", defaultValue: false, description: "")
         booleanParam(name: "DISABLE_SCCACHE", defaultValue: false, description: "")
-        // TODO: add SKIP_SIGNING
+        booleanParam(name: "SKIP_SIGNING", defaultValue: true, description: "")
         booleanParam(name: "DEBUG", defaultValue: false, description: "")
     }
     environment {
@@ -24,40 +25,7 @@ pipeline {
         stage("env") {
             steps {
                 script {
-                    CHANNEL = params.CHANNEL
-                    CHANNEL_CAPITALIZED = CHANNEL.capitalize()
-                    WIPE_WORKSPACE = params.WIPE_WORKSPACE
-                    RUN_INIT = params.RUN_INIT
-                    DISABLE_SCCACHE = params.DISABLE_SCCACHE
-                    DEBUG = params.DEBUG
-                    BUILD_TYPE = "Release"
-                    OUT_DIR = "src/out/" + BUILD_TYPE
-                    LINT_BRANCH = "TEMP_LINT_BRANCH_" + BUILD_NUMBER
-                    RELEASE_TYPE = (env.JOB_NAME.equals("brave-browser-build") ? "release" : "ci")
-                    BRAVE_GITHUB_TOKEN = "brave-browser-releases-github"
-                    GITHUB_API = "https://api.github.com/repos/gab-ai-inc"
-                    GITHUB_CREDENTIAL_ID = "brave-builds-github-token-for-pr-builder"
-                    SKIP = false
-                    BRANCH = env.BRANCH_NAME
-                    TARGET_BRANCH = "master"
-                    if (env.CHANGE_BRANCH) {
-                        BRANCH = env.CHANGE_BRANCH
-                        TARGET_BRANCH = env.CHANGE_TARGET
-                        def prNumber = readJSON(text: httpRequest(url: GITHUB_API + "/defiant-browser/pulls?head=brave:" + BRANCH, authentication: GITHUB_CREDENTIAL_ID, quiet: !DEBUG).content)[0].number
-                        def prDetails = readJSON(text: httpRequest(url: GITHUB_API + "/defiant-browser/pulls/" + prNumber, authentication: GITHUB_CREDENTIAL_ID, quiet: !DEBUG).content)
-                        SKIP = prDetails.mergeable_state.equals("draft") or prDetails.labels.count { label -> label.name.equals("CI/Skip") }.equals(1)
-                        env.SLACK_USERNAME = readJSON(text: SLACK_USERNAME_MAP)[env.CHANGE_AUTHOR]
-                        if (env.SLACK_USERNAME) {
-                            slackSend(color:null, channel: env.SLACK_USERNAME, message: "STARTED - ${JOB_NAME} #${BUILD_NUMBER} (<${BUILD_URL}/flowGraphTable/?auto_refresh=true|Open>)")
-                        }
-                    }
-                    BRANCH_EXISTS_IN_BC = httpRequest(url: GITHUB_API + "/defiant-core/branches/" + BRANCH, validResponseCodes: "100:499", authentication: GITHUB_CREDENTIAL_ID, quiet: !DEBUG).status.equals(200)
-                    if (BRANCH_EXISTS_IN_BC) {
-                        def bcPrDetails = readJSON(text: httpRequest(url: GITHUB_API + "/defiant-core/pulls?head=brave:" + BRANCH, authentication: GITHUB_CREDENTIAL_ID, quiet: !DEBUG).content)[0]
-                        if (bcPrDetails) {
-                            env.BC_PR_NUMBER = bcPrDetails.number
-                        }
-                    }
+                    setEnv()
                 }
             }
         }
@@ -65,7 +33,7 @@ pipeline {
             steps {
                 script {
                     if (SKIP) {
-                        echo "Aborting build as PR is in draft or has \"CI/Skip\" label"
+                        echo "Aborting build as PR is in draft or has \"CI/skip\" label"
                         stopCurrentBuild()
                     }
                     else if (BRANCH_EXISTS_IN_BC) {
@@ -85,20 +53,25 @@ pipeline {
                     def bb_package_json = readJSON(text: httpRequest(url: "https://raw.githubusercontent.com/brave/brave-browser/" + BRANCH + "/package.json", quiet: !DEBUG).content)
                     def bb_version = bb_package_json.version
                     def bc_branch = bb_package_json.config.projects["brave-core"].branch
+                    if (BRANCH_EXISTS_IN_BC) {
+                        bc_branch = BRANCH
+                    }
                     def bc_version = readJSON(text: httpRequest(url: "https://raw.githubusercontent.com/brave/brave-core/" + bc_branch + "/package.json", quiet: !DEBUG).content).version
                     if (bb_version != bc_version) {
-                        echo "Version mismatch between brave-browser (" + bb_version + ") and brave-core (" + bc_version + ") in package.json"
+                        echo "Version mismatch between brave-browser (" + BRANCH + "/" + bb_version + ") and brave-core (" + bc_branch + "/" + bc_version + ") in package.json"
                         SKIP = true
                         stopCurrentBuild()
                     }
-                    for (build in getBuilds()) {
-                        if (build.isBuilding() && build.getNumber() < env.BUILD_NUMBER.toInteger()) {
-                            echo "Aborting older running build " + build
-                            build.doStop()
-                            // build.finish(hudson.model.Result.ABORTED, new java.io.IOException("Aborting build"))
+                    if (!SKIP) {
+                        for (build in getBuilds()) {
+                            if (build.isBuilding() && build.getNumber() < env.BUILD_NUMBER.toInteger()) {
+                                echo "Aborting older running build " + build
+                                build.doStop()
+                                // build.finish(hudson.model.Result.ABORTED, new java.io.IOException("Aborting build"))
+                            }
                         }
+                        sleep(time: 1, unit: "MINUTES")
                     }
-                    sleep(time: 1, unit: "MINUTES")
                 }
             }
         }
@@ -109,10 +82,15 @@ pipeline {
             }
             parallel {
                 stage("android") {
+                    when {
+                        beforeAgent true
+                        expression { !SKIP_ANDROID }
+                    }
                     agent { label "android-${RELEASE_TYPE}" }
                     environment {
                         GIT_CACHE_PATH = "${HOME}/cache"
                         SCCACHE_BUCKET = credentials("brave-browser-sccache-android-s3-bucket")
+                        SCCACHE_ERROR_LOG  = "${WORKSPACE}/sccache.log"
                     }
                     stages {
                         stage("checkout") {
@@ -123,7 +101,7 @@ pipeline {
                                 }
                             }
                             steps {
-                                checkout([$class: "GitSCM", branches: [[name: "${BRANCH}"]], extensions: [[$class: "WipeWorkspace"]], userRemoteConfigs: [[url: "https://github.com/gab-ai-inc/defiant-browser.git"]]])
+                                checkout([$class: "GitSCM", branches: [[name: BRANCH]], extensions: [[$class: "WipeWorkspace"]], userRemoteConfigs: [[url: "https://github.com/gab-ai-inc/defiant-browser.git"]]])
                             }
                         }
                         stage("pin") {
@@ -147,121 +125,14 @@ pipeline {
                         }
                         stage("init") {
                             when {
-                                expression { return !fileExists("src/brave/package.json") || RUN_INIT }
+                                expression { return !fileExists("src/brave/package.json") || !SKIP_INIT }
                             }
-                            steps {
-                                sh "npm run init -- --target_os=android"
-                            }
-                        }
-                        stage("sync") {
-                            steps {
-                                sh "npm run sync -- --all --target_os=android"
-                            }
-                        }
-                        stage("lint") {
-                            steps {
-                                script {
-                                    try {
-                                        sh """
-                                            set -e
-                                            git -C src/brave config user.name freespeech4ever
-                                            git -C src/brave config user.email trip@basher.me
-                                            git -C src/brave checkout -b ${LINT_BRANCH}
-                                            npm run lint -- --base=origin/${TARGET_BRANCH}
-                                            git -C src/brave checkout -q -
-                                            git -C src/brave branch -D ${LINT_BRANCH}
-                                        """
-                                    }
-                                    catch (ex) {
-                                        currentBuild.result = "UNSTABLE"
-                                    }
-                                }
-                            }
-                        }
-                        stage("sccache") {
-                            when {
-                                allOf {
-                                    expression { !DISABLE_SCCACHE }
-                                    expression { "${RELEASE_TYPE}" == "ci" }
-                                }
-                            }
-                            steps {
-                                echo "Enabling sccache"
-                                sh "npm config --userconfig=.npmrc set sccache sccache"
-                            }
-                        }
-                        stage("build") {
                             steps {
                                 sh """
                                     set -e
-                                    npm config --userconfig=.npmrc set brave_referrals_api_key ${REFERRAL_API_KEY}
-                                    npm config --userconfig=.npmrc set brave_google_api_endpoint https://location.services.mozilla.com/v1/geolocate?key=
-                                    npm config --userconfig=.npmrc set brave_google_api_key ${BRAVE_GOOGLE_API_KEY}
-                                    npm config --userconfig=.npmrc set google_api_endpoint safebrowsing.brave.com
-                                    npm config --userconfig=.npmrc set google_api_key dummytoken
-                                    npm run build -- ${BUILD_TYPE} --channel=${CHANNEL} --official_build=true --target_os=android
+                                    rm -rf src/brave
+                                    npm run init -- --target_os=android
                                 """
-                            }
-                        }
-                        stage("archive") {
-                            steps {
-                                withAWS(credentials: "mac-build-s3-upload-artifacts", region: "us-west-2") {
-                                    s3Upload(acl: "Private", bucket: "${BRAVE_ARTIFACTS_BUCKET}", includePathPattern: "apks/*.apk",
-                                        path: "${JOB_NAME}/${BUILD_NUMBER}/", pathStyleAccessEnabled: true, payloadSigningEnabled: true, workingDir: "${OUT_DIR}"
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-                stage("linux") {
-                    agent { label "linux-${RELEASE_TYPE}" }
-                    environment {
-                        GIT_CACHE_PATH = "${HOME}/cache"
-                        SCCACHE_BUCKET = credentials("brave-browser-sccache-linux-s3-bucket")
-                    }
-                    stages {
-                        stage("checkout") {
-                            when {
-                                anyOf {
-                                    expression { WIPE_WORKSPACE }
-                                    expression { return !fileExists("package.json") }
-                                }
-                            }
-                            steps {
-                                checkout([$class: "GitSCM", branches: [[name: "${BRANCH}"]], extensions: [[$class: "WipeWorkspace"]], userRemoteConfigs: [[url: "https://github.com/gab-ai-inc/defiant-browser.git"]]])
-                            }
-                        }
-                        stage("pin") {
-                            when {
-                                expression { BRANCH_EXISTS_IN_BC }
-                            }
-                            steps {
-                                echo "Pinning brave-core to use branch ${BRANCH}"
-                                sh """
-                                    set -e
-                                    jq 'del(.config.projects["brave-core"].branch) | .config.projects["brave-core"].branch="${BRANCH}"' package.json > package.json.new
-                                    mv package.json.new package.json
-                                """
-                            }
-                        }
-                        stage("install") {
-                            steps {
-                                sh "npm install --no-optional"
-                                sh "rm -rf ${GIT_CACHE_PATH}/*.lock"
-                            }
-                        }
-                        stage("init") {
-                            when {
-                                expression { return !fileExists("src/brave/package.json") || RUN_INIT }
-                            }
-                            steps {
-                                sh "npm run init"
-                            }
-                        }
-                        stage("sync") {
-                            steps {
-                                sh "npm run sync -- --all"
                             }
                         }
                         stage("lint") {
@@ -286,7 +157,7 @@ pipeline {
                         }
                         stage("audit-deps") {
                             steps {
-                                timeout(time: 2, unit: "MINUTES") {
+                                timeout(time: 1, unit: "MINUTES") {
                                     script {
                                         try {
                                             sh "npm run audit_deps"
@@ -302,7 +173,127 @@ pipeline {
                             when {
                                 allOf {
                                     expression { !DISABLE_SCCACHE }
-                                    expression { "${RELEASE_TYPE}" == "ci" }
+                                    expression { RELEASE_TYPE.equals("ci") }
+                                }
+                            }
+                            steps {
+                                echo "Enabling sccache"
+                                sh "npm config --userconfig=.npmrc set sccache sccache"
+                            }
+                        }
+                        stage("build") {
+                            steps {
+                                sh """
+                                    set -e
+                                    npm config --userconfig=.npmrc set brave_referrals_api_key ${REFERRAL_API_KEY}
+                                    npm config --userconfig=.npmrc set brave_google_api_endpoint https://location.services.mozilla.com/v1/geolocate?key=
+                                    npm config --userconfig=.npmrc set brave_google_api_key ${BRAVE_GOOGLE_API_KEY}
+                                    npm config --userconfig=.npmrc set google_api_endpoint safebrowsing.brave.com
+                                    npm config --userconfig=.npmrc set google_api_key dummytoken
+                                    npm run build -- ${BUILD_TYPE} --channel=${CHANNEL} --official_build=true --target_os=android --target_arch=arm64
+                                """
+                            }
+                        }
+                        stage("archive") {
+                            steps {
+                                s3Upload(acl: "Private", bucket: BRAVE_ARTIFACTS_BUCKET, includePathPattern: "apks/*.apk", path: BUILD_TAG_SLASHED, workingDir: "android_" + BUILD_TYPE + "_arm64")
+                            }
+                        }
+                    }
+                }
+                stage("linux") {
+                    when {
+                        beforeAgent true
+                        expression { !SKIP_LINUX }
+                    }
+                    agent { label "linux-${RELEASE_TYPE}" }
+                    environment {
+                        GIT_CACHE_PATH = "${HOME}/cache"
+                        SCCACHE_BUCKET = credentials("brave-browser-sccache-linux-s3-bucket")
+                        SCCACHE_ERROR_LOG  = "${WORKSPACE}/sccache.log"
+                    }
+                    stages {
+                        stage("checkout") {
+                            when {
+                                anyOf {
+                                    expression { WIPE_WORKSPACE }
+                                    expression { return !fileExists("package.json") }
+                                }
+                            }
+                            steps {
+                                checkout([$class: "GitSCM", branches: [[name: BRANCH]], extensions: [[$class: "WipeWorkspace"]], userRemoteConfigs: [[url: "https://github.com/gab-ai-inc/defiant-browser.git"]]])
+                            }
+                        }
+                        stage("pin") {
+                            when {
+                                expression { BRANCH_EXISTS_IN_BC }
+                            }
+                            steps {
+                                echo "Pinning brave-core to use branch ${BRANCH}"
+                                sh """
+                                    set -e
+                                    jq 'del(.config.projects["brave-core"].branch) | .config.projects["brave-core"].branch="${BRANCH}"' package.json > package.json.new
+                                    mv package.json.new package.json
+                                """
+                            }
+                        }
+                        stage("install") {
+                            steps {
+                                sh "npm install --no-optional"
+                                sh "rm -rf ${GIT_CACHE_PATH}/*.lock"
+                            }
+                        }
+                        stage("init") {
+                            when {
+                                expression { return !fileExists("src/brave/package.json") || !SKIP_INIT }
+                            }
+                            steps {
+                                sh """
+                                    set -e
+                                    rm -rf src/brave
+                                    npm run init
+                                """
+                            }
+                        }
+                        stage("lint") {
+                            steps {
+                                script {
+                                    try {
+                                        sh """
+                                            set -e
+                                            git -C src/brave config user.name freespeech4ever
+                                            git -C src/brave config user.email trip@basher.me
+                                            git -C src/brave checkout -b ${LINT_BRANCH}
+                                            npm run lint -- --base=origin/${TARGET_BRANCH}
+                                            git -C src/brave checkout -q -
+                                            git -C src/brave branch -D ${LINT_BRANCH}
+                                        """
+                                    }
+                                    catch (ex) {
+                                        currentBuild.result = "UNSTABLE"
+                                    }
+                                }
+                            }
+                        }
+                        stage("audit-deps") {
+                            steps {
+                                timeout(time: 1, unit: "MINUTES") {
+                                    script {
+                                        try {
+                                            sh "npm run audit_deps"
+                                        }
+                                        catch (ex) {
+                                            currentBuild.result = "UNSTABLE"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        stage("sccache") {
+                            when {
+                                allOf {
+                                    expression { !DISABLE_SCCACHE }
+                                    expression { RELEASE_TYPE.equals("ci") }
                                 }
                             }
                             steps {
@@ -374,21 +365,27 @@ pipeline {
                         }
                         stage("archive") {
                             steps {
-                                s3Upload(acl: "Private", bucket: "${BRAVE_ARTIFACTS_BUCKET}", includePathPattern: "*.deb",
-                                    path: "${JOB_NAME}/${BUILD_NUMBER}/", pathStyleAccessEnabled: true, payloadSigningEnabled: true, workingDir: "${OUT_DIR}"
-                                )
-                                s3Upload(acl: "Private", bucket: "${BRAVE_ARTIFACTS_BUCKET}", includePathPattern: "*.rpm",
-                                    path: "${JOB_NAME}/${BUILD_NUMBER}/", pathStyleAccessEnabled: true, payloadSigningEnabled: true, workingDir: "${OUT_DIR}"
-                                )
+                                s3Upload(acl: "Private", bucket: BRAVE_ARTIFACTS_BUCKET, includePathPattern: "*.deb", path: BUILD_TAG_SLASHED, workingDir: OUT_DIR)
+                                s3Upload(acl: "Private", bucket: BRAVE_ARTIFACTS_BUCKET, includePathPattern: "*.rpm", path: BUILD_TAG_SLASHED, workingDir: OUT_DIR)
                             }
                         }
                     }
                 }
                 stage("mac") {
+                    when {
+                        beforeAgent true
+                        expression { !SKIP_MACOS }
+                    }
                     agent { label "mac-${RELEASE_TYPE}" }
                     environment {
                         GIT_CACHE_PATH = "${HOME}/cache"
                         SCCACHE_BUCKET = credentials("brave-browser-sccache-mac-s3-bucket")
+                        SCCACHE_ERROR_LOG  = "${WORKSPACE}/sccache.log"
+                        KEYCHAIN = "signing-${RELEASE_TYPE}"
+                        KEYCHAIN_PATH = "/Users/jenkins/Library/Keychains/${KEYCHAIN}.keychain-db"
+                        KEYCHAIN_PASS = credentials("mac-${RELEASE_TYPE}-signing-keychain-password")
+                        MAC_APPLICATION_SIGNING_IDENTIFIER = credentials("mac-${RELEASE_TYPE}-signing-application-id")
+                        MAC_INSTALLER_SIGNING_IDENTIFIER = credentials("mac-${RELEASE_TYPE}-signing-installer-id")
                     }
                     stages {
                         stage("checkout") {
@@ -399,7 +396,7 @@ pipeline {
                                 }
                             }
                             steps {
-                                checkout([$class: "GitSCM", branches: [[name: "${BRANCH}"]], extensions: [[$class: "WipeWorkspace"]], userRemoteConfigs: [[url: "https://github.com/gab-ai-inc/defiant-browser.git"]]])
+                                checkout([$class: "GitSCM", branches: [[name: BRANCH]], extensions: [[$class: "WipeWorkspace"]], userRemoteConfigs: [[url: "https://github.com/gab-ai-inc/defiant-browser.git"]]])
                             }
                         }
                         stage("pin") {
@@ -417,22 +414,21 @@ pipeline {
                         }
                         stage("install") {
                             steps {
-                                buildName "${BUILD_NUMBER}-${BRANCH}-"+"${GIT_COMMIT}".substring(0, 7)
+                                buildName env.BUILD_NUMBER + "-" + BRANCH + "-" + env.GIT_COMMIT.substring(0, 7)
                                 sh "npm install --no-optional"
                                 sh "rm -rf ${GIT_CACHE_PATH}/*.lock"
                             }
                         }
                         stage("init") {
                             when {
-                                expression { return !fileExists("src/brave/package.json") || RUN_INIT }
+                                expression { return !fileExists("src/brave/package.json") || !SKIP_INIT }
                             }
                             steps {
-                                sh "npm run init"
-                            }
-                        }
-                        stage("sync") {
-                            steps {
-                                sh "npm run sync -- --all"
+                                sh """
+                                    set -e
+                                    rm -rf src/brave
+                                    npm run init
+                                """
                             }
                         }
                         stage("lint") {
@@ -457,7 +453,7 @@ pipeline {
                         }
                         stage("audit-deps") {
                             steps {
-                                timeout(time: 2, unit: "MINUTES") {
+                                timeout(time: 1, unit: "MINUTES") {
                                     script {
                                         try {
                                             sh "npm run audit_deps"
@@ -473,7 +469,7 @@ pipeline {
                             when {
                                 allOf {
                                     expression { !DISABLE_SCCACHE }
-                                    expression { "${RELEASE_TYPE}" == "ci" }
+                                    expression { RELEASE_TYPE.equals("ci") }
                                 }
                             }
                             steps {
@@ -499,7 +495,7 @@ pipeline {
                                 timeout(time: 4, unit: "MINUTES") {
                                     script {
                                         try {
-                                            sh "npm run network-audit -- --output_path=\"${OUT_DIR}/Brave\\ Browser\\ ${CHANNEL_CAPITALIZED}.app/Contents/MacOS/Brave\\ Browser\\ ${CHANNEL_CAPITALIZED}\""
+                                            sh "npm run network-audit -- --output_path=\"${OUT_DIR}/Brave\\ Browser${CHANNEL_CAPITALIZED_BACKSLASHED_SPACED}.app/Contents/MacOS/Brave\\ Browser${CHANNEL_CAPITALIZED_BACKSLASHED_SPACED}\""
                                         }
                                         catch (ex) {
                                             currentBuild.result = "UNSTABLE"
@@ -540,31 +536,30 @@ pipeline {
                         }
                         stage("dist") {
                             steps {
-                                sh "npm run create_dist -- ${BUILD_TYPE} --channel=${CHANNEL} --official_build=true --skip_signing"
+                                sh """
+                                    set -e
+                                    security unlock-keychain -p "${KEYCHAIN_PASS}" "${KEYCHAIN_PATH}"
+                                    npm run create_dist -- ${BUILD_TYPE} --channel=${CHANNEL} --official_build=true ${SKIP_SIGNING} --mac_signing_keychain=${KEYCHAIN} --mac_signing_identifier=${MAC_APPLICATION_SIGNING_IDENTIFIER} --mac_installer_signing_identifier=${MAC_INSTALLER_SIGNING_IDENTIFIER}
+                                    security lock-keychain -a
+                                """
                             }
                         }
                         stage("archive") {
                             steps {
                                 withAWS(credentials: "mac-build-s3-upload-artifacts", region: "us-west-2") {
-                                    s3Upload(acl: "Private", bucket: "${BRAVE_ARTIFACTS_BUCKET}", includePathPattern: "unsigned_dmg/*.dmg",
-                                        path: "${JOB_NAME}/${BUILD_NUMBER}/", pathStyleAccessEnabled: true, payloadSigningEnabled: true, workingDir: "${OUT_DIR}"
-                                    )
-                                }
-                                withAWS(credentials: "mac-build-s3-upload-artifacts", region: "us-west-2") {
-                                    s3Upload(acl: "Private", bucket: "${BRAVE_ARTIFACTS_BUCKET}", includePathPattern: "*.dmg",
-                                        path: "${JOB_NAME}/${BUILD_NUMBER}/", pathStyleAccessEnabled: true, payloadSigningEnabled: true, workingDir: "${OUT_DIR}"
-                                    )
-                                }
-                                withAWS(credentials: "mac-build-s3-upload-artifacts", region: "us-west-2") {
-                                    s3Upload(acl: "Private", bucket: "${BRAVE_ARTIFACTS_BUCKET}", includePathPattern: "*.pkg",
-                                        path: "${JOB_NAME}/${BUILD_NUMBER}/", pathStyleAccessEnabled: true, payloadSigningEnabled: true, workingDir: "${OUT_DIR}"
-                                    )
+                                    s3Upload(acl: "Private", bucket: BRAVE_ARTIFACTS_BUCKET, includePathPattern: "unsigned_dmg/*.dmg", path: BUILD_TAG_SLASHED, workingDir: OUT_DIR)
+                                    s3Upload(acl: "Private", bucket: BRAVE_ARTIFACTS_BUCKET, includePathPattern: "*.dmg", path: BUILD_TAG_SLASHED, workingDir: OUT_DIR)
+                                    s3Upload(acl: "Private", bucket: BRAVE_ARTIFACTS_BUCKET, includePathPattern: "*.pkg", path: BUILD_TAG_SLASHED, workingDir: OUT_DIR)
                                 }
                             }
                         }
                     }
                 }
                 stage("windows-x64") {
+                    when {
+                        beforeAgent true
+                        expression { !SKIP_WINDOWS }
+                    }
                     agent { label "windows-${RELEASE_TYPE}" }
                     environment {
                         GIT_CACHE_PATH = "${USERPROFILE}\\cache"
@@ -586,7 +581,7 @@ pipeline {
                                 }
                             }
                             steps {
-                                checkout([$class: "GitSCM", branches: [[name: "${BRANCH}"]], extensions: [[$class: "WipeWorkspace"]], userRemoteConfigs: [[url: "https://github.com/gab-ai-inc/defiant-browser.git"]]])
+                                checkout([$class: "GitSCM", branches: [[name: BRANCH]], extensions: [[$class: "WipeWorkspace"]], userRemoteConfigs: [[url: "https://github.com/gab-ai-inc/defiant-browser.git"]]])
                             }
                         }
                         stage("pin") {
@@ -609,25 +604,20 @@ pipeline {
                                     \$ErrorActionPreference = "Stop"
                                     npm install --no-optional
                                     Remove-Item -ErrorAction SilentlyContinue -Force ${GIT_CACHE_PATH}/*.lock
+                                    Import-PfxCertificate -FilePath "${KEY_PFX_PATH}" -CertStoreLocation "Cert:\\LocalMachine\\My" -Password (ConvertTo-SecureString -String "${AUTHENTICODE_PASSWORD_UNESCAPED}" -AsPlaintext -Force)
                                 """
                             }
                         }
                         stage("init") {
                             when {
-                                expression { return !fileExists("src/brave/package.json") || RUN_INIT }
+                                expression { return !fileExists("src/brave/package.json") || !SKIP_INIT }
                             }
                             steps {
                                 powershell """
                                     \$ErrorActionPreference = "Stop"
+                                    Remove-Item -ErrorAction SilentlyContinue -Force src/brave
+                                    git -C vendor/depot_tools clean -fxd
                                     npm run init
-                                """
-                            }
-                        }
-                        stage("sync") {
-                            steps {
-                                powershell """
-                                    \$ErrorActionPreference = "Stop"
-                                    npm run sync -- --all
                                 """
                             }
                         }
@@ -653,7 +643,7 @@ pipeline {
                         }
                         stage("audit-deps") {
                             steps {
-                                timeout(time: 2, unit: "MINUTES") {
+                                timeout(time: 1, unit: "MINUTES") {
                                     script {
                                         try {
                                             powershell """
@@ -719,36 +709,21 @@ pipeline {
                             steps {
                                 powershell """
                                     \$ErrorActionPreference = "Stop"
-                                    Import-PfxCertificate -FilePath "${KEY_PFX_PATH}" -CertStoreLocation "Cert:\\LocalMachine\\My" -Password (ConvertTo-SecureString -String "${AUTHENTICODE_PASSWORD_UNESCAPED}" -AsPlaintext -Force)
-                                    npm run create_dist -- ${BUILD_TYPE} --channel=${CHANNEL} --official_build=true --skip_signing
+                                    npm run create_dist -- ${BUILD_TYPE} --channel=${CHANNEL} --official_build=true ${SKIP_SIGNING}
                                     (Get-Content src/brave/vendor/omaha/omaha/hammer-brave.bat) | % { \$_ -replace "10.0.15063.0\\\\", "" } | Set-Content src/brave/vendor/omaha/omaha/hammer-brave.bat
-                                    npm run create_dist -- ${BUILD_TYPE} --channel=${CHANNEL} --build_omaha --tag_ap=x64-${CHANNEL} --target_arch=x64 --official_build=true --skip_signing
+                                    npm run create_dist -- ${BUILD_TYPE} --channel=${CHANNEL} --official_build=true ${SKIP_SIGNING} --build_omaha --tag_ap=x64-${CHANNEL}
                                 """
                             }
                         }
                         stage("archive") {
                             steps {
-                                s3Upload(acl: "Private", bucket: "${BRAVE_ARTIFACTS_BUCKET}", includePathPattern: "brave_installer_*.exe",
-                                    path: "${JOB_NAME}/${BUILD_NUMBER}/", pathStyleAccessEnabled: true, payloadSigningEnabled: true, workingDir: "${OUT_DIR}"
-                                )
-                                s3Upload(acl: "Private", bucket: "${BRAVE_ARTIFACTS_BUCKET}", includePathPattern: "BraveBrowser${CHANNEL_CAPITALIZED}Setup_*.exe",
-                                    path: "${JOB_NAME}/${BUILD_NUMBER}/", pathStyleAccessEnabled: true, payloadSigningEnabled: true, workingDir: "${OUT_DIR}"
-                                )
-                                s3Upload(acl: "Private", bucket: "${BRAVE_ARTIFACTS_BUCKET}", includePathPattern: "BraveBrowserSilent${CHANNEL_CAPITALIZED}Setup_*.exe",
-                                    path: "${JOB_NAME}/${BUILD_NUMBER}/", pathStyleAccessEnabled: true, payloadSigningEnabled: true, workingDir: "${OUT_DIR}"
-                                )
-                                s3Upload(acl: "Private", bucket: "${BRAVE_ARTIFACTS_BUCKET}", includePathPattern: "BraveBrowserStandalone${CHANNEL_CAPITALIZED}Setup_*.exe",
-                                    path: "${JOB_NAME}/${BUILD_NUMBER}/", pathStyleAccessEnabled: true, payloadSigningEnabled: true, workingDir: "${OUT_DIR}"
-                                )
-                                s3Upload(acl: "Private", bucket: "${BRAVE_ARTIFACTS_BUCKET}", includePathPattern: "BraveBrowserStandaloneSilent${CHANNEL_CAPITALIZED}Setup_*.exe",
-                                    path: "${JOB_NAME}/${BUILD_NUMBER}/", pathStyleAccessEnabled: true, payloadSigningEnabled: true, workingDir: "${OUT_DIR}"
-                                )
-                                s3Upload(acl: "Private", bucket: "${BRAVE_ARTIFACTS_BUCKET}", includePathPattern: "BraveBrowserStandaloneUntagged${CHANNEL_CAPITALIZED}Setup_*.exe",
-                                    path: "${JOB_NAME}/${BUILD_NUMBER}/", pathStyleAccessEnabled: true, payloadSigningEnabled: true, workingDir: "${OUT_DIR}"
-                                )
-                                s3Upload(acl: "Private", bucket: "${BRAVE_ARTIFACTS_BUCKET}", includePathPattern: "BraveBrowserUntagged${CHANNEL_CAPITALIZED}Setup_*.exe",
-                                    path: "${JOB_NAME}/${BUILD_NUMBER}/", pathStyleAccessEnabled: true, payloadSigningEnabled: true, workingDir: "${OUT_DIR}"
-                                )
+                                s3Upload(acl: "Private", bucket: BRAVE_ARTIFACTS_BUCKET, includePathPattern: "brave_installer_*.exe", path: BUILD_TAG_SLASHED, workingDir: OUT_DIR)
+                                s3Upload(acl: "Private", bucket: BRAVE_ARTIFACTS_BUCKET, includePathPattern: "BraveBrowser" + CHANNEL_CAPITALIZED + "Setup_*.exe", path: BUILD_TAG_SLASHED, workingDir: OUT_DIR)
+                                s3Upload(acl: "Private", bucket: BRAVE_ARTIFACTS_BUCKET, includePathPattern: "BraveBrowserSilent" + CHANNEL_CAPITALIZED + "Setup_*.exe", path: BUILD_TAG_SLASHED, workingDir: OUT_DIR)
+                                s3Upload(acl: "Private", bucket: BRAVE_ARTIFACTS_BUCKET, includePathPattern: "BraveBrowserStandalone" + CHANNEL_CAPITALIZED + "Setup_*.exe", path: BUILD_TAG_SLASHED, workingDir: OUT_DIR)
+                                s3Upload(acl: "Private", bucket: BRAVE_ARTIFACTS_BUCKET, includePathPattern: "BraveBrowserStandaloneSilent" + CHANNEL_CAPITALIZED + "Setup_*.exe", path: BUILD_TAG_SLASHED, workingDir: OUT_DIR)
+                                s3Upload(acl: "Private", bucket: BRAVE_ARTIFACTS_BUCKET, includePathPattern: "BraveBrowserStandaloneUntagged" + CHANNEL_CAPITALIZED + "Setup_*.exe", path: BUILD_TAG_SLASHED, workingDir: OUT_DIR)
+                                s3Upload(acl: "Private", bucket: BRAVE_ARTIFACTS_BUCKET, includePathPattern: "BraveBrowserUntagged" + CHANNEL_CAPITALIZED + "Setup_*.exe", path: BUILD_TAG_SLASHED, workingDir: OUT_DIR)
                             }
                         }
                     }
@@ -761,9 +736,64 @@ pipeline {
             script {
                 if (env.SLACK_USERNAME) {
                     def slackColorMap = ["SUCCESS": "good", "FAILURE": "danger", "UNSTABLE": "warning", "ABORTED": null]
-                    slackSend(color: slackColorMap[currentBuild.currentResult], channel: env.SLACK_USERNAME, message: currentBuild.currentResult + " - ${JOB_NAME} #${BUILD_NUMBER} (<${BUILD_URL}/flowGraphTable/?auto_refresh=true|Open>)")
+                    slackSend(color: slackColorMap[currentBuild.currentResult], channel: env.SLACK_USERNAME, message: currentBuild.currentResult + " " + BUILD_TAG_SLASHED + " (<${BUILD_URL}/flowGraphTable/?auto_refresh=true|Open>)")
                 }
             }
+        }
+    }
+}
+
+def setEnv() {
+    CHANNEL = params.CHANNEL
+    CHANNEL_CAPITALIZED = CHANNEL.equals("release") ? "" : CHANNEL.capitalize()
+    CHANNEL_CAPITALIZED_BACKSLASHED_SPACED = CHANNEL.equals("release") ? "" : "\\ " + CHANNEL.capitalize()
+    BUILD_TYPE = params.BUILD_TYPE
+    WIPE_WORKSPACE = params.WIPE_WORKSPACE
+    SKIP_INIT = params.SKIP_INIT
+    DISABLE_SCCACHE = params.DISABLE_SCCACHE
+    SKIP_SIGNING = params.SKIP_SIGNING ? "--skip_signing" : ""
+    DEBUG = params.DEBUG
+    RELEASE_TYPE = env.JOB_NAME.equals("brave-browser-build") ? "release" : "ci"
+    OUT_DIR = "src/out/" + BUILD_TYPE
+    BUILD_TAG_SLASHED = env.JOB_NAME + "/" + env.BUILD_NUMBER
+    LINT_BRANCH = "TEMP_LINT_BRANCH_" + env.BUILD_NUMBER
+    BRAVE_GITHUB_TOKEN = "brave-browser-releases-github"
+    GITHUB_API = "https://api.github.com/repos/brave"
+    GITHUB_CREDENTIAL_ID = "brave-builds-github-token-for-pr-builder"
+    RUST_LOG = "sccache=warn"
+    SKIP = false
+    SKIP_ANDROID = false
+    SKIP_LINUX = false
+    SKIP_MACOS = false
+    SKIP_WINDOWS = false   
+    BRANCH = env.BRANCH_NAME
+    TARGET_BRANCH = "master"
+    if (env.CHANGE_BRANCH) {
+        BRANCH = env.CHANGE_BRANCH
+        TARGET_BRANCH = env.CHANGE_TARGET
+        def bbPrNumber = readJSON(text: httpRequest(url: GITHUB_API + "/brave-browser/pulls?head=brave:" + BRANCH, authentication: GITHUB_CREDENTIAL_ID, quiet: !DEBUG).content)[0].number
+        def bbPrDetails = readJSON(text: httpRequest(url: GITHUB_API + "/brave-browser/pulls/" + bbPrNumber, authentication: GITHUB_CREDENTIAL_ID, quiet: !DEBUG).content)
+        SKIP = bbPrDetails.mergeable_state.equals("draft") || bbPrDetails.labels.count { label -> label.name.equalsIgnoreCase("CI/skip") }.equals(1)
+        SKIP_ANDROID = bbPrDetails.labels.count { label -> label.name.equalsIgnoreCase("CI/skip-android") }.equals(1)
+        SKIP_LINUX = bbPrDetails.labels.count { label -> label.name.equalsIgnoreCase("CI/skip-linux") }.equals(1)
+        SKIP_MACOS = bbPrDetails.labels.count { label -> label.name.equalsIgnoreCase("CI/skip-macos") }.equals(1)
+        SKIP_WINDOWS = bbPrDetails.labels.count { label -> label.name.equalsIgnoreCase("CI/skip-windows") }.equals(1)
+        env.SLACK_USERNAME = readJSON(text: SLACK_USERNAME_MAP)[env.CHANGE_AUTHOR]
+        if (env.SLACK_USERNAME) {
+            slackSend(color: null, channel: env.SLACK_USERNAME, message: "STARTED " + BUILD_TAG_SLASHED + " (<${BUILD_URL}/flowGraphTable/?auto_refresh=true|Open>)")
+        }
+    }
+    BRANCH_EXISTS_IN_BC = httpRequest(url: GITHUB_API + "/brave-core/branches/" + BRANCH, validResponseCodes: "100:499", authentication: GITHUB_CREDENTIAL_ID, quiet: !DEBUG).status.equals(200)
+    if (BRANCH_EXISTS_IN_BC) {
+        def bcPrDetails = readJSON(text: httpRequest(url: GITHUB_API + "/brave-core/pulls?head=brave:" + BRANCH, authentication: GITHUB_CREDENTIAL_ID, quiet: !DEBUG).content)[0]
+        if (bcPrDetails) {
+            env.BC_PR_NUMBER = bcPrDetails.number
+            bcPrDetails = readJSON(text: httpRequest(url: GITHUB_API + "/brave-core/pulls/" +  env.BC_PR_NUMBER, authentication: GITHUB_CREDENTIAL_ID, quiet: !DEBUG).content)
+            SKIP = bcPrDetails.mergeable_state.equals("draft") || bcPrDetails.labels.count { label -> label.name.equalsIgnoreCase("CI/skip") }.equals(1)
+            SKIP_ANDROID = SKIP_ANDROID || bcPrDetails.labels.count { label -> label.name.equalsIgnoreCase("CI/skip-android") }.equals(1)
+            SKIP_LINUX = SKIP_LINUX || bcPrDetails.labels.count { label -> label.name.equalsIgnoreCase("CI/skip-linux") }.equals(1)
+            SKIP_MACOS = SKIP_MACOS || bcPrDetails.labels.count { label -> label.name.equalsIgnoreCase("CI/skip-macos") }.equals(1)
+            SKIP_WINDOWS = SKIP_WINDOWS || bcPrDetails.labels.count { label -> label.name.equalsIgnoreCase("CI/skip-windows") }.equals(1)
         }
     }
 }

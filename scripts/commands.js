@@ -32,6 +32,7 @@ program
   .option('-C <build_dir>', 'build config (out/Debug, out/Release')
   .option('--target_os <target_os>', 'target OS')
   .option('--target_arch <target_arch>', 'target architecture', 'x64')
+  .option('--target_apk_base <target_apk_base>', 'target Android OS apk (classic, modern, mono)', 'classic')
   .option('--mac_signing_identifier <id>', 'The identifier to use for signing')
   .option('--mac_signing_keychain <keychain>', 'The identifier to use for signing', 'login')
   .option('--debug_build <debug_build>', 'keep debugging symbols')
@@ -126,6 +127,8 @@ program
   .option('--disable_brave_extension', 'disable loading the Brave extension')
   .option('--single_process', 'uses a single process to run tests to help with debugging')
   .option('--test_launcher_jobs <test_launcher_jobs>', 'Number of jobs to launch')
+  .option('--target_os <target_os>', 'target OS')
+  .option('--target_arch <target_arch>', 'target architecture', 'x64')
   .arguments('[build_config]')
   .action(test)
 
