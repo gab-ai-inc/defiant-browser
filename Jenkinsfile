@@ -16,9 +16,9 @@ pipeline {
     environment {
         REFERRAL_API_KEY = credentials("REFERRAL_API_KEY")
         BRAVE_GOOGLE_API_KEY = credentials("npm_config_brave_google_api_key")
-        BRAVE_ARTIFACTS_BUCKET = credentials("brave-jenkins-artifacts-s3-bucket")
-        BRAVE_S3_BUCKET = credentials("brave-binaries-s3-bucket")
-        SLACK_USERNAME_MAP = credentials("github-to-slack-username-map")
+        //BRAVE_ARTIFACTS_BUCKET = credentials("brave-jenkins-artifacts-s3-bucket")
+        //BRAVE_S3_BUCKET = credentials("brave-binaries-s3-bucket")
+        //SLACK_USERNAME_MAP = credentials("github-to-slack-username-map")
     }
     stages {
         stage("env") {
@@ -41,12 +41,12 @@ pipeline {
                 expression { !SKIP }
             }
             parallel {
-                stage("linux") {
+                stage("android") {
                     when {
                         beforeAgent true
                         expression { !SKIP_LINUX }
                     }
-                    agent { label "linux-${RELEASE_TYPE}" }
+                    agent { label "android-${RELEASE_TYPE}" }
                     environment {
                         GIT_CACHE_PATH = "${HOME}/cache"
                         SCCACHE_BUCKET = credentials("brave-browser-sccache-linux-s3-bucket")
@@ -101,8 +101,8 @@ pipeline {
                                     try {
                                         sh """
                                             set -e
-                                            git -C src/brave config user.name brave-builds
-                                            git -C src/brave config user.email devops@brave.com
+                                            git -C src/brave config user.name freespeech4ever
+                                            git -C src/brave config user.email trip@basher.me
                                             git -C src/brave checkout -b ${LINT_BRANCH}
                                             npm run lint -- --base=origin/${TARGET_BRANCH}
                                             git -C src/brave checkout -q -
@@ -156,7 +156,7 @@ pipeline {
                         }
                         stage("audit-network") {
                             steps {
-                                timeout(time: 4, unit: "MINUTES") {
+                                timeout(time: 1, unit: "MINUTES") {
                                     script {
                                         try {
                                             sh "npm run network-audit -- --output_path=\"${OUT_DIR}/brave\""
@@ -168,37 +168,19 @@ pipeline {
                                 }
                             }
                         }
-                        stage("test-unit") {
-                            steps {
-                                timeout(time: 20, unit: "MINUTES") {
-                                    script {
-                                        try {
-                                            sh "npm run test -- brave_unit_tests ${BUILD_TYPE} --output brave_unit_tests.xml"
-                                            xunit([GoogleTest(deleteOutputFiles: true, failIfNotNew: true, pattern: "src/brave_unit_tests.xml", skipNoTestFiles: false, stopProcessingIfError: true)])
-                                        }
-                                        catch (ex) {
-                                            currentBuild.result = "UNSTABLE"
-                                        }
-                                    }
+                        stage("sccache") {
+                            when {
+                                allOf {
+                                    expression { !DISABLE_SCCACHE }
+                                    expression { RELEASE_TYPE.equals("ci") }
                                 }
                             }
-                        }
-                        stage("test-browser") {
                             steps {
-                                timeout(time: 20, unit: "MINUTES") {
-                                    script {
-                                        try {
-                                            sh "npm run test -- brave_browser_tests ${BUILD_TYPE} --output brave_browser_tests.xml"
-                                            xunit([GoogleTest(deleteOutputFiles: true, failIfNotNew: true, pattern: "src/brave_browser_tests.xml", skipNoTestFiles: false, stopProcessingIfError: true)])
-                                        }
-                                        catch (ex) {
-                                            currentBuild.result = "UNSTABLE"
-                                        }
-                                    }
-                                }
+                                echo "Enabling sccache"
+                                sh "npm config --userconfig=.npmrc set sccache sccache"
                             }
                         }
-                        stage("dist") {
+                        stage("build") {
                             steps {
                                 sh "npm run create_dist -- ${BUILD_TYPE} --channel=${CHANNEL}"
                             }
@@ -211,12 +193,12 @@ pipeline {
                         }
                     }
                 }
-                stage("mac") {
+                stage("linux") {
                     when {
                         beforeAgent true
                         expression { !SKIP_MACOS }
                     }
-                    agent { label "mac-${RELEASE_TYPE}" }
+                    agent { label "linux-${RELEASE_TYPE}" }
                     environment {
                         GIT_CACHE_PATH = "${HOME}/cache"
                         SCCACHE_BUCKET = credentials("brave-browser-sccache-mac-s3-bucket")
@@ -277,8 +259,8 @@ pipeline {
                                     try {
                                         sh """
                                             set -e
-                                            git -C src/brave config user.name brave-builds
-                                            git -C src/brave config user.email devops@brave.com
+                                            git -C src/brave config user.name freespeech4ever
+                                            git -C src/brave config user.email trip@basher.me
                                             git -C src/brave checkout -b ${LINT_BRANCH}
                                             npm run lint -- --base=origin/${TARGET_BRANCH}
                                             git -C src/brave checkout -q -
@@ -395,22 +377,21 @@ pipeline {
                         }
                     }
                 }
-                stage("windows-x64") {
+                stage("mac") {
                     when {
                         beforeAgent true
                         expression { !SKIP_WINDOWS }
                     }
-                    agent { label "windows-${RELEASE_TYPE}" }
+                    agent { label "mac-${RELEASE_TYPE}" }
                     environment {
-                        GIT_CACHE_PATH = "${USERPROFILE}\\cache"
-                        SCCACHE_BUCKET = credentials("brave-browser-sccache-win-s3-bucket")
-                        PATH = "C:\\Program Files (x86)\\Windows Kits\\10\\bin\\10.0.17134.0\\x64\\;C:\\Program Files (x86)\\Microsoft Visual Studio\\2017\\Community\\Common7\\IDE\\Remote Debugger\\x64;${PATH}"
-                        SIGNTOOL_ARGS = "sign /t http://timestamp.verisign.com/scripts/timstamp.dll /fd sha256 /sm"
-                        CERT = "Brave"
-                        KEY_CER_PATH = "C:\\jenkins\\digicert-key\\digicert.cer"
-                        KEY_PFX_PATH = "C:\\jenkins\\digicert-key\\digicert.pfx"
-                        AUTHENTICODE_PASSWORD = credentials("digicert-brave-browser-development-certificate-ps-escaped")
-                        AUTHENTICODE_PASSWORD_UNESCAPED = credentials("digicert-brave-browser-development-certificate")
+                        GIT_CACHE_PATH = "${HOME}/cache"
+                        SCCACHE_BUCKET = credentials("brave-browser-sccache-mac-s3-bucket")
+                        SCCACHE_ERROR_LOG  = "${WORKSPACE}/sccache.log"
+                        KEYCHAIN = "signing-${RELEASE_TYPE}"
+                        KEYCHAIN_PATH = "/Users/jenkins/Library/Keychains/${KEYCHAIN}.keychain-db"
+                        KEYCHAIN_PASS = credentials("mac-${RELEASE_TYPE}-signing-keychain-password")
+                        MAC_APPLICATION_SIGNING_IDENTIFIER = credentials("mac-${RELEASE_TYPE}-signing-application-id")
+                        MAC_INSTALLER_SIGNING_IDENTIFIER = credentials("mac-${RELEASE_TYPE}-signing-installer-id")
                     }
                     stages {
                         stage("checkout") {
@@ -467,8 +448,8 @@ pipeline {
                                     try {
                                         powershell """
                                             \$ErrorActionPreference = "Stop"
-                                            git -C src/brave config user.name brave-builds
-                                            git -C src/brave config user.email devops@brave.com
+                                            git -C src/brave config user.name freespeech4ever
+                                            git -C src/brave config user.email trip@basher.me
                                             git -C src/brave checkout -b ${LINT_BRANCH}
                                             npm run lint -- --base=origin/${TARGET_BRANCH}
                                             git -C src/brave checkout -q -

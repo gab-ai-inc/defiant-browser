@@ -1,6 +1,6 @@
 {
-  "name": "brave",
-  "version": "0.65.118",
+"name": "dissenter",
+"version": "0.65.118",
   "description": "Next generation Brave browser for macOS, Windows, Linux, and eventually Android",
   "scripts": {
     "audit_deps": "node ./scripts/audit.js",
@@ -14,13 +14,13 @@
     "update_patches": "node ./scripts/commands.js update_patches",
     "apply_patches": "node ./scripts/sync.js --run_hooks",
     "start": "node ./scripts/commands.js start",
-    "network-audit": "node ./scripts/commands.js start --enable_brave_update --network_log --user_data_dir_name=brave-network-test",
+    "network-audit": "node ./scripts/commands.js start --enable_dissenter_update --network_log --user_data_dir_name=brave-network-test",
     "push_l10n": "node ./scripts/commands.js push_l10n",
     "pull_l10n": "node ./scripts/commands.js pull_l10n",
     "chromium_rebase_l10n": "node ./scripts/commands.js chromium_rebase_l10n",
     "lint": "node ./scripts/commands.js lint",
     "test": "node ./scripts/commands.js test",
-    "test-security": "npm run audit_deps && node ./scripts/commands.js start --enable_brave_update --network_log --user_data_dir_name=brave-network-test"
+    "test-security": "npm run audit_deps && node ./scripts/commands.js start --enable_dissenter_update --network_log --user_data_dir_name=brave-network-test"
   },
   "config": {
     "projects": {
@@ -44,7 +44,7 @@
         "dir": "src/brave",
         "branch": "0.65.x",
         "repository": {
-          "url": "https://github.com/brave/brave-core.git"
+          "url": "https://github.com/gab-ai-inc/defiant-core.git"
         }
       }
     },
@@ -54,12 +54,16 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/brave/brave-browser.git"
+    "url": "git+https://github.com/gab-ai-inc/defiant-browser.git"
   },
   "author": {
-    "name": "Brave Software <support@brave.com>"
+    "name": "Gab AI, Inc. <legal@gab.com>"
   },
   "contributors": [
+    {
+      "name": "Free Speech Forever",
+      "email": "trip@basher.me"
+    },
     {
       "name": "Cezar Augusto",
       "email": "cezar@brave.com"
@@ -251,9 +255,9 @@
   ],
   "license": "MPL-2.0",
   "bugs": {
-    "url": "https://github.com/brave/brave-browser/issues"
+    "url": "https://github.com/gab-ai-inc/defiant-browser/issues"
   },
-  "homepage": "https://github.com/brave/brave-browser#readme",
+  "homepage": "https://dissenter.com",
   "dependencies": {
     "commander": "^2.9.0",
     "fs-extra": "^1.0.0"
