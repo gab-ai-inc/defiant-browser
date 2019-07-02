@@ -41,12 +41,12 @@ pipeline {
                 expression { !SKIP }
             }
             parallel {
-                stage("android") {
+                stage("linux") {
                     when {
                         beforeAgent true
                         expression { !SKIP_LINUX }
                     }
-                    agent { label "android-${RELEASE_TYPE}" }
+                    agent { label "linux-${RELEASE_TYPE}" }
                     environment {
                         GIT_CACHE_PATH = "${HOME}/cache"
                         SCCACHE_BUCKET = credentials("brave-browser-sccache-linux-s3-bucket")
@@ -176,12 +176,6 @@ pipeline {
                                 }
                             }
                             steps {
-                                echo "Enabling sccache"
-                                sh "npm config --userconfig=.npmrc set sccache sccache"
-                            }
-                        }
-                        stage("build") {
-                            steps {
                                 sh "npm run create_dist -- ${BUILD_TYPE} --channel=${CHANNEL}"
                             }
                         }
@@ -193,12 +187,12 @@ pipeline {
                         }
                     }
                 }
-                stage("linux") {
+                stage("mac") {
                     when {
                         beforeAgent true
                         expression { !SKIP_MACOS }
                     }
-                    agent { label "linux-${RELEASE_TYPE}" }
+                    agent { label "mac-${RELEASE_TYPE}" }
                     environment {
                         GIT_CACHE_PATH = "${HOME}/cache"
                         SCCACHE_BUCKET = credentials("brave-browser-sccache-mac-s3-bucket")
@@ -377,12 +371,12 @@ pipeline {
                         }
                     }
                 }
-                stage("mac") {
+                stage("windows-x64") {
                     when {
                         beforeAgent true
                         expression { !SKIP_WINDOWS }
                     }
-                    agent { label "mac-${RELEASE_TYPE}" }
+                    agent { label "windows-${RELEASE_TYPE}" }
                     environment {
                         GIT_CACHE_PATH = "${HOME}/cache"
                         SCCACHE_BUCKET = credentials("brave-browser-sccache-mac-s3-bucket")
