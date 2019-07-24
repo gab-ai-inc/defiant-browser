@@ -1,6 +1,6 @@
 {
   "name": "dissenter",
-  "version": "0.66.100",
+  "version": "0.66.101",
   "description": "Dissenter browser for macOS, Windows, Linux, and eventually Android",
   "scripts": {
     "audit_deps": "node ./scripts/audit.js",
@@ -42,7 +42,7 @@
       },
       "brave-core": {
         "dir": "src/brave",
-        "branch": "66.99",
+        "branch": "66.101",
         "repository": {
           "url": "https://github.com/gab-ai-inc/defiant-core.git"
         }
